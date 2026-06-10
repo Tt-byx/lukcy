@@ -1,0 +1,11 @@
+**/node_modules
+**/dist
+**/target
+**/.idea
+**/.vscode
+**/.trae
+**/doc
+**/*.md
+**/.git
+**/.gitignore
+docker-compose.yml

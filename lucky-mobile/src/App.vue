@@ -1,0 +1,1044 @@
+<template>
+  <div class="mobile-app">
+    <!-- 加载中 -->
+    <div v-if="loading" class="loading-page">
+      <div class="loading-content">
+        <div class="loading-spinner">
+          <div class="spinner-ring"></div>
+          <div class="spinner-ring delay-1"></div>
+          <div class="spinner-ring delay-2"></div>
+        </div>
+        <h2>加载中</h2>
+        <p>正在获取活动信息</p>
+      </div>
+    </div>
+
+    <!-- 已注册：直播间界面 -->
+    <div v-else-if="registered" class="live-room" :style="liveRoomStyle">
+      <!-- 视频背景 -->
+      <video
+        v-if="screenConfig.mobileBackgroundType === 'video' && screenConfig.mobileBackgroundUrl"
+        class="live-bg-video"
+        :src="screenConfig.mobileBackgroundUrl"
+        muted loop autoplay playsinline
+      ></video>
+
+      <!-- 消息滚动区 -->
+      <div class="message-area" ref="messageArea">
+        <div v-for="(msg, idx) in liveMessages" :key="idx" class="live-msg">
+          <span class="msg-sender">{{ msg.sender }}</span>
+          <span class="msg-content">{{ msg.content }}</span>
+        </div>
+        <div v-if="liveMessages.length === 0" class="empty-hint">
+          <div class="empty-icon">💬</div>
+          <p>等待弹幕中...</p>
+        </div>
+      </div>
+
+      <!-- 底部输入栏 -->
+      <div class="live-input-bar">
+        <div class="quick-bar">
+          <span
+            v-for="msg in quickMessages"
+            :key="msg"
+            class="quick-chip"
+            @click="quickSend(msg)"
+          >{{ msg }}</span>
+        </div>
+        <div class="input-row">
+          <input
+            v-model="danmakuText"
+            type="text"
+            placeholder="说点什么..."
+            maxlength="50"
+            @keyup.enter="sendDanmaku"
+          />
+          <button @click="sendDanmaku" :disabled="!danmakuText.trim() || sending">
+            <span v-if="sending" class="btn-loading"></span>
+            <span v-else>发送</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 无活动 -->
+    <div v-else-if="noActivity" class="empty-page">
+      <div class="empty-content">
+        <div class="empty-icon-large">🎉</div>
+        <h2>暂无活动</h2>
+        <p>当前没有进行中的抽奖活动</p>
+        <p class="sub-text">请稍后再试</p>
+      </div>
+    </div>
+
+    <!-- 未注册：显示注册表单 -->
+    <div v-else class="register-page">
+      <!-- 背景装饰 -->
+      <div class="bg-decoration">
+        <div class="circle circle-1"></div>
+        <div class="circle circle-2"></div>
+        <div class="circle circle-3"></div>
+      </div>
+
+      <div class="register-content">
+        <!-- Logo区域 -->
+        <div class="logo-area">
+          <div class="logo-ornament">
+            <div class="ornament-line"></div>
+            <div class="ornament-diamond"></div>
+            <div class="ornament-line"></div>
+          </div>
+          <h1>{{ activityName }}</h1>
+          <p>填写信息参与抽奖</p>
+        </div>
+
+        <!-- 快速进入：只需输入学号 -->
+        <div v-if="!showFullForm" class="register-form">
+          <div class="form-header">
+            <h3>快速进入</h3>
+            <p>输入学号直接参与</p>
+          </div>
+
+          <div class="form-group">
+            <label>学号</label>
+            <div class="input-wrapper">
+              <input v-model="quickStudentId" type="text" placeholder="输入学号快速进入" @keyup.enter="quickEnter" />
+              <button class="btn-quick" @click="quickEnter" :disabled="!quickStudentId.trim() || quickChecking">
+                <span v-if="quickChecking" class="btn-loading"></span>
+                <span v-else>→</span>
+              </button>
+            </div>
+          </div>
+
+          <p class="switch-form" @click="showFullForm = true">
+            首次参加？<span class="link">点此注册</span>
+          </p>
+
+          <div v-if="errorMsg" class="error-msg">
+            <p>{{ errorMsg }}</p>
+          </div>
+        </div>
+
+        <!-- 完整注册表单 -->
+        <form v-else class="register-form" @submit.prevent="register">
+          <div class="form-header">
+            <h3>注册参与</h3>
+            <p>填写信息参与抽奖</p>
+          </div>
+
+          <div class="form-group">
+            <label>姓名 <span class="required">*</span></label>
+            <input v-model="form.name" type="text" placeholder="请输入姓名" required />
+          </div>
+
+          <div class="form-group">
+            <label>学号 <span class="required">*</span></label>
+            <input v-model="form.studentId" type="text" placeholder="请输入学号" required />
+          </div>
+
+          <div class="form-group">
+            <label>手机号</label>
+            <input v-model="form.phone" type="tel" placeholder="请输入手机号（可选）" />
+          </div>
+
+          <button type="submit" class="btn-register" :disabled="registering || !activityId">
+            <span v-if="registering" class="btn-loading"></span>
+            <span v-else>参与抽奖</span>
+          </button>
+
+          <p class="switch-form" @click="showFullForm = false">
+            已有账号？<span class="link">快速进入</span>
+          </p>
+
+          <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
+        </form>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8080'
+const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080/ws/lucky'
+
+// 状态
+const loading = ref(true)
+const activityName = ref('幸运抽奖')
+const activityId = ref(null)
+const registered = ref(false)
+const participant = ref({})
+const registering = ref(false)
+const errorMsg = ref('')
+const noActivity = ref(false)
+
+// 弹幕相关
+const danmakuText = ref('')
+const sending = ref(false)
+
+// 快速进入
+const showFullForm = ref(false)
+const quickStudentId = ref('')
+const quickChecking = ref(false)
+
+// 直播间相关
+const liveMessages = ref([])
+const messageArea = ref(null)
+
+// 背景配置
+const screenConfig = ref({ mobileBackgroundType: null, mobileBackgroundUrl: null })
+
+// WebSocket
+let ws = null
+let reconnectTimer = null
+
+const quickMessages = [
+  '太棒了！', '恭喜恭喜！', '加油！', '666', '中奖！',
+  '哈哈哈', '厉害了', '冲冲冲', '好期待', '稳了'
+]
+
+// 表单
+const form = ref({
+  name: '',
+  studentId: '',
+  phone: ''
+})
+
+// 直播间背景样式
+const liveRoomStyle = computed(() => {
+  if (screenConfig.value.mobileBackgroundType === 'image' && screenConfig.value.mobileBackgroundUrl) {
+    return {
+      backgroundImage: `url(${screenConfig.value.mobileBackgroundUrl})`,
+      backgroundSize: 'cover',
+      backgroundPosition: 'center',
+      backgroundRepeat: 'no-repeat'
+    }
+  }
+  return {}
+})
+
+// 获取当前活动
+async function fetchActivity() {
+  try {
+    const res = await fetch(`${API_BASE}/api/activity/current`)
+    const data = await res.json()
+    if (data.code === 200 && data.data) {
+      activityName.value = data.data.name
+      activityId.value = data.data.id
+      noActivity.value = false
+    } else {
+      noActivity.value = true
+    }
+  } catch (e) {
+    console.error('获取活动失败:', e)
+    noActivity.value = true
+  } finally {
+    loading.value = false
+  }
+}
+
+// 获取屏幕配置
+async function fetchScreenConfig() {
+  try {
+    const res = await fetch(`${API_BASE}/api/screen/config`)
+    const data = await res.json()
+    if (data.code === 200 && data.data) {
+      screenConfig.value = data.data
+    }
+  } catch (e) {
+    console.error('获取屏幕配置失败:', e)
+  }
+}
+
+// 连接 WebSocket
+function connectWebSocket() {
+  if (ws && ws.readyState === WebSocket.OPEN) return
+
+  const url = `${WS_URL}?participantId=${participant.value.id}&activityId=${activityId.value}`
+  ws = new WebSocket(url)
+
+  ws.onopen = () => {
+    console.log('WebSocket 连接成功')
+  }
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data)
+      switch (msg.type) {
+        case 'danmaku':
+          liveMessages.value.push({
+            sender: msg.data.participantName || '匿名',
+            content: msg.data.content
+          })
+          if (liveMessages.value.length > 100) {
+            liveMessages.value = liveMessages.value.slice(-100)
+          }
+          nextTick(() => {
+            if (messageArea.value) {
+              messageArea.value.scrollTop = messageArea.value.scrollHeight
+            }
+          })
+          break
+        case 'muted':
+          alert(msg.data || '您已被管理员禁言')
+          break
+        case 'banned':
+          alert(msg.data || '您已被移出直播间')
+          disconnectWebSocket()
+          registered.value = false
+          localStorage.removeItem('lucky_participant')
+          break
+        case 'lottery_removed':
+          alert(msg.data || '您的抽奖资格已被移除')
+          break
+      }
+    } catch (e) {
+      console.error('解析 WebSocket 消息失败:', e)
+    }
+  }
+
+  ws.onclose = () => {
+    console.log('WebSocket 断开，3秒后重连')
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = setTimeout(connectWebSocket, 3000)
+  }
+
+  ws.onerror = (err) => {
+    console.error('WebSocket 错误:', err)
+  }
+}
+
+// 断开 WebSocket
+function disconnectWebSocket() {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  if (ws) {
+    ws.close()
+    ws = null
+  }
+}
+
+// 注册
+async function register() {
+  if (!form.value.name || !form.value.studentId) {
+    errorMsg.value = '请填写姓名和学号'
+    return
+  }
+
+  registering.value = true
+  errorMsg.value = ''
+
+  try {
+    const res = await fetch(`${API_BASE}/api/participant/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        activityId: activityId.value,
+        ...form.value
+      })
+    })
+    const data = await res.json()
+
+    if (data.code === 200) {
+      participant.value = data.data
+      registered.value = true
+      localStorage.setItem('lucky_participant', JSON.stringify(data.data))
+      connectWebSocket()
+      fetchScreenConfig()
+    } else {
+      errorMsg.value = data.message || '注册失败，请重试'
+    }
+  } catch (e) {
+    errorMsg.value = '网络错误，请检查网络连接'
+  } finally {
+    registering.value = false
+  }
+}
+
+// 学号快速进入
+async function quickEnter() {
+  const sid = quickStudentId.value.trim()
+  if (!sid || quickChecking.value) return
+
+  quickChecking.value = true
+  errorMsg.value = ''
+
+  try {
+    const res = await fetch(`${API_BASE}/api/participant/check?activityId=${activityId.value}&studentId=${encodeURIComponent(sid)}`)
+    const data = await res.json()
+
+    if (data.code === 200 && data.data) {
+      participant.value = data.data
+      registered.value = true
+      localStorage.setItem('lucky_participant', JSON.stringify(data.data))
+      connectWebSocket()
+      fetchScreenConfig()
+    } else {
+      errorMsg.value = '该学号未注册，请先注册'
+      showFullForm.value = true
+      form.value.studentId = sid
+    }
+  } catch (e) {
+    errorMsg.value = '网络错误，请重试'
+  } finally {
+    quickChecking.value = false
+  }
+}
+
+// 发送弹幕
+async function sendDanmaku() {
+  const text = danmakuText.value.trim()
+  if (!text || sending.value) return
+
+  sending.value = true
+  try {
+    const res = await fetch(`${API_BASE}/api/danmaku/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        activityId: activityId.value,
+        participantId: participant.value.id,
+        content: text
+      })
+    })
+    const data = await res.json()
+
+    if (data.code === 200) {
+      danmakuText.value = ''
+    } else {
+      alert(data.message || '发送失败')
+    }
+  } catch (e) {
+    alert('网络错误')
+  } finally {
+    sending.value = false
+  }
+}
+
+// 快捷发送
+function quickSend(msg) {
+  danmakuText.value = msg
+  sendDanmaku()
+}
+
+onMounted(() => {
+  fetchActivity().then(() => {
+    if (noActivity.value) {
+      localStorage.removeItem('lucky_participant')
+      participant.value = {}
+      registered.value = false
+      return
+    }
+
+    const saved = localStorage.getItem('lucky_participant')
+    if (saved) {
+      try {
+        const savedParticipant = JSON.parse(saved)
+        if (savedParticipant.activityId === activityId.value) {
+          participant.value = savedParticipant
+          registered.value = true
+          connectWebSocket()
+          fetchScreenConfig()
+        } else {
+          localStorage.removeItem('lucky_participant')
+          participant.value = {}
+          registered.value = false
+        }
+      } catch (e) {
+        localStorage.removeItem('lucky_participant')
+        participant.value = {}
+        registered.value = false
+      }
+    }
+  })
+})
+
+onUnmounted(() => {
+  disconnectWebSocket()
+})
+</script>
+
+<style scoped>
+/* 设计系统 - 移动端优化 */
+:root {
+  --color-primary: #f59e0b;
+  --color-primary-dark: #d97706;
+  --color-bg: #0f0f0f;
+  --color-bg-light: #1a1a1a;
+  --color-bg-card: rgba(255, 255, 255, 0.03);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-focus: rgba(245, 158, 11, 0.5);
+  --color-text: #f5f5f5;
+  --color-text-secondary: #a0a0a0;
+  --color-text-muted: #666;
+  --color-error: #ef4444;
+  --color-error-bg: rgba(239, 68, 68, 0.1);
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+.mobile-app {
+  min-height: 100vh;
+  background: var(--color-bg);
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  color: var(--color-text);
+  position: relative;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 加载页面 */
+.loading-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+}
+
+.loading-content {
+  text-align: center;
+}
+
+.loading-spinner {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  margin: 0 auto 24px;
+}
+
+.spinner-ring {
+  position: absolute;
+  inset: 0;
+  border: 3px solid transparent;
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: spin 1.2s linear infinite;
+}
+
+.spinner-ring.delay-1 {
+  inset: 8px;
+  border-top-color: rgba(245, 158, 11, 0.6);
+  animation-delay: 0.15s;
+}
+
+.spinner-ring.delay-2 {
+  inset: 16px;
+  border-top-color: rgba(245, 158, 11, 0.3);
+  animation-delay: 0.3s;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-content h2 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.loading-content p {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+/* 空页面 */
+.empty-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-bg);
+}
+
+.empty-content {
+  text-align: center;
+  padding: 40px;
+}
+
+.empty-icon-large {
+  font-size: 64px;
+  margin-bottom: 24px;
+}
+
+.empty-content h2 {
+  font-size: 24px;
+  font-weight: 600;
+  margin-bottom: 12px;
+}
+
+.empty-content p {
+  font-size: 15px;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+}
+
+.sub-text {
+  font-size: 13px !important;
+  color: var(--color-text-muted) !important;
+}
+
+/* 直播间 */
+.live-room {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  position: relative;
+  z-index: 1;
+  background: var(--color-bg);
+}
+
+.live-bg-video {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: -1;
+  opacity: 0.3;
+}
+
+.message-area {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 16px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.live-msg {
+  margin-bottom: 16px;
+  animation: fadeInUp 0.3s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msg-sender {
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.msg-content {
+  color: var(--color-text);
+  font-size: 15px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  background: var(--color-bg-card);
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+}
+
+.empty-hint {
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 14px;
+  padding: 60px 0;
+}
+
+.empty-icon {
+  font-size: 48px;
+  margin-bottom: 16px;
+  opacity: 0.5;
+}
+
+.live-input-bar {
+  flex-shrink: 0;
+  padding: 12px 16px 20px;
+  background: rgba(15, 15, 15, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid var(--color-border);
+}
+
+.quick-bar {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 12px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.quick-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.quick-chip {
+  white-space: nowrap;
+  padding: 8px 16px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.quick-chip:active {
+  background: var(--color-border);
+  transform: scale(0.95);
+}
+
+.input-row {
+  display: flex;
+  gap: 10px;
+}
+
+.input-row input {
+  flex: 1;
+  padding: 12px 16px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  font-size: 15px;
+  color: var(--color-text);
+  outline: none;
+  transition: all 0.2s ease;
+}
+
+.input-row input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.input-row input:focus {
+  border-color: var(--color-border-focus);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.input-row button {
+  padding: 12px 24px;
+  background: var(--color-primary);
+  color: #000;
+  border: none;
+  border-radius: var(--radius-full);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.2s ease;
+  min-width: 70px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.input-row button:active:not(:disabled) {
+  background: var(--color-primary-dark);
+  transform: scale(0.95);
+}
+
+.input-row button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-loading {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(0, 0, 0, 0.2);
+  border-top-color: #000;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* 注册页面 */
+.register-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  position: relative;
+  z-index: 1;
+  background: var(--color-bg);
+  overflow: hidden;
+}
+
+.bg-decoration {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.circle {
+  position: absolute;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(245, 158, 11, 0.1) 0%, transparent 70%);
+}
+
+.circle-1 {
+  width: 300px;
+  height: 300px;
+  top: -100px;
+  right: -100px;
+}
+
+.circle-2 {
+  width: 200px;
+  height: 200px;
+  bottom: -50px;
+  left: -50px;
+}
+
+.circle-3 {
+  width: 150px;
+  height: 150px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
+.register-content {
+  width: 100%;
+  max-width: 400px;
+  position: relative;
+  z-index: 1;
+}
+
+.logo-area {
+  text-align: center;
+  margin-bottom: 40px;
+}
+
+.logo-ornament {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+
+.ornament-line {
+  width: 50px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--color-primary), transparent);
+}
+
+.ornament-diamond {
+  width: 10px;
+  height: 10px;
+  background: var(--color-primary);
+  transform: rotate(45deg);
+}
+
+.logo-area h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--color-text);
+  margin-bottom: 12px;
+  letter-spacing: 0.5px;
+}
+
+.logo-area p {
+  color: var(--color-text-secondary);
+  font-size: 15px;
+}
+
+/* 注册表单 */
+.register-form {
+  width: 100%;
+  background: var(--color-bg-light);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 28px 24px;
+  animation: fadeInUp 0.4s ease-out;
+}
+
+.form-header {
+  text-align: center;
+  margin-bottom: 28px;
+}
+
+.form-header h3 {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.form-header p {
+  font-size: 14px;
+  color: var(--color-text-secondary);
+}
+
+.form-group {
+  margin-bottom: 20px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  margin-bottom: 8px;
+}
+
+.required {
+  color: var(--color-error);
+}
+
+.input-wrapper {
+  position: relative;
+  display: flex;
+  gap: 10px;
+}
+
+.form-group input,
+.input-wrapper input {
+  width: 100%;
+  padding: 14px 16px;
+  background: var(--color-bg-card);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: 15px;
+  color: var(--color-text);
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+.form-group input::placeholder,
+.input-wrapper input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.form-group input:focus,
+.input-wrapper input:focus {
+  border-color: var(--color-border-focus);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.btn-quick {
+  padding: 14px 18px;
+  background: var(--color-primary);
+  color: #000;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  flex-shrink: 0;
+}
+
+.btn-quick:active:not(:disabled) {
+  background: var(--color-primary-dark);
+  transform: scale(0.95);
+}
+
+.btn-quick:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-register {
+  width: 100%;
+  padding: 16px;
+  background: var(--color-primary);
+  color: #000;
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.btn-register:hover:not(:disabled) {
+  background: var(--color-primary-dark);
+}
+
+.btn-register:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn-register:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.error-msg {
+  margin-top: 16px;
+  padding: 12px 16px;
+  background: var(--color-error-bg);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: var(--radius-md);
+}
+
+.error-msg p {
+  color: var(--color-error);
+  font-size: 13px;
+  text-align: center;
+  margin: 0;
+}
+
+.switch-form {
+  margin-top: 20px;
+  font-size: 14px;
+  color: var(--color-text-secondary);
+  text-align: center;
+  cursor: pointer;
+}
+
+.switch-form:hover {
+  color: var(--color-text);
+}
+
+.link {
+  color: var(--color-primary);
+  font-weight: 500;
+}
+
+/* 入场动画 */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 响应式调整 */
+@media (max-width: 375px) {
+  .register-content {
+    padding: 0 8px;
+  }
+
+  .register-form {
+    padding: 24px 20px;
+  }
+
+  .logo-area h1 {
+    font-size: 24px;
+  }
+}
+</style>
