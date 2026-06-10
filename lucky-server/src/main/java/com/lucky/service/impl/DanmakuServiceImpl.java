@@ -7,10 +7,10 @@ import com.lucky.entity.Danmaku;
 import com.lucky.entity.Participant;
 import com.lucky.mapper.DanmakuMapper;
 import com.lucky.mapper.ParticipantMapper;
+import com.lucky.mq.MessageProducer;
 import com.lucky.service.DanmakuService;
 import com.lucky.service.SensitiveWordService;
 import com.lucky.exception.BusinessException;
-import com.lucky.websocket.LuckyWebSocketHandler;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 
@@ -24,7 +24,7 @@ public class DanmakuServiceImpl extends ServiceImpl<DanmakuMapper, Danmaku>
         implements DanmakuService {
 
     private final SensitiveWordService sensitiveWordService;
-    private final LuckyWebSocketHandler webSocketHandler;
+    private final MessageProducer messageProducer;
     private final ParticipantMapper participantMapper;
 
     @Override
@@ -63,8 +63,8 @@ public class DanmakuServiceImpl extends ServiceImpl<DanmakuMapper, Danmaku>
         danmaku.setStatus(1); // 自动通过
         save(danmaku);
 
-        // 广播到大屏（携带发送者名字）
-        broadcastDanmaku(danmaku);
+        // 通过消息队列异步广播到大屏
+        broadcastDanmakuAsync(danmaku);
 
         return danmaku;
     }
@@ -76,21 +76,26 @@ public class DanmakuServiceImpl extends ServiceImpl<DanmakuMapper, Danmaku>
             danmaku.setStatus(status);
             updateById(danmaku);
 
-            // 如果通过，广播到大屏（携带发送者名字）
+            // 如果通过，通过消息队列异步广播到大屏
             if (status == 1) {
-                broadcastDanmaku(danmaku);
+                broadcastDanmakuAsync(danmaku);
             }
         }
     }
 
-    private void broadcastDanmaku(Danmaku danmaku) {
+    /**
+     * 异步广播弹幕（通过消息队列）
+     */
+    private void broadcastDanmakuAsync(Danmaku danmaku) {
         Participant p = participantMapper.selectById(danmaku.getParticipantId());
         Map<String, Object> data = new HashMap<>();
         data.put("id", danmaku.getId());
         data.put("content", danmaku.getContent());
         data.put("participantName", p != null ? p.getName() : "匿名");
         data.put("activityId", danmaku.getActivityId());
-        webSocketHandler.broadcast("danmaku", data);
+
+        // 发送到消息队列，异步处理
+        messageProducer.sendDanmaku(data);
     }
 
     @Override
