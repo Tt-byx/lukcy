@@ -70,5 +70,5 @@ docker-compose.override.yml
 .claude/
 CLAUDE.md
 
-# Doc (optional, uncomment if you don't want docs in repo)
-# doc/
+# Doc
+doc/
